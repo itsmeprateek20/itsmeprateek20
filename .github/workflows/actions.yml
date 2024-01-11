@@ -1,0 +1,6 @@
+name: 'CD-IntelDS-ddh-qa-v1'
+
+on:
+  workflow_dispatch: # Allows manual triggering
+  schedule:
+   - cron: "20 13 * * *" # Triggers every day at midnight UTC
