@@ -1,13 +1,134 @@
-name: 'CD-IntelDS-ddh-qa-v1'
+name: 'CD-IntelDS-dih-qa-v1'
 
 on:
-  # schedule:
-  #  - cron: '30 14 * * *' # Triggers every day at midnight UTC
   workflow_dispatch: # Allows manual triggering
+  
+env:
+   TF_VAR_account_id: ${{vars.DIH_ACCOUNT_ID}}
+   AWS_REGION: ${{vars.AWS_REGION}}
+   TF_VAR_build_role: ${{vars.DIH_BUILD_ROLE}}
+   TF_VAR_build_role_external_id: ${{secrets.DIH_BUILD_ROLE_EXTERNAL_ID}}
+   TF_VAR_platform_name: ${{vars.PLATFORM_NAME}}
+   TF_VAR_account_name: ${{vars.DIH_ACC_NAME_SHORT}}
+   TF_VAR_env: ${{vars.ENV}}
+   TF_TOKEN: ${{secrets.JF_ACCESS_TOKEN}}
+   TF_VAR_teams_webhook_url: ${{secrets.COST_ANOMALY_WEBHOOK_URL}}
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  TerraformTesting:
+    runs-on: [ orchestrator-runner ]
+    environment: QA
+
+  
+
     steps:
-    - name: Display Hello World
-      run: echo "Hello, World!"
+      # Checkout the repository to the GitHub Actions runner
+      - name: Clone the Repository
+        uses: actions/checkout@v3
+      # Setup Terraform for testing
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1
+        with:
+          terraform_version: "1.6.2"
+          terraform_wrapper: false
+
+      # Setup Python for test
+      - name: Setup Python
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ runner.tool_cache }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Functional Testing with Terraform Test
+        id: ttest
+        run : |
+          envsubst < terraformrc > ~/.terraformrc
+          cd src/dih/terraform/tests/functional
+          terraform init -backend-config="bucket=${{ vars.BACKEND_BUCKET }}" \
+            -backend-config="key=${{vars.BACKEND_DIH_KEY}}" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ vars.BACKEND_DYNAMODB }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="assume_role={\"role_arn\":\"${{ vars.BACKEND_ROLE_ARN }}\",\"external_id\":\"${{ secrets.BACKEND_EXTERNAL_ID }}\"}"
+          terraform test
+
+      - name: Functional Testing with pytest
+        run: |
+          pip install pytest tftest coverage pytest-cov
+          cd src/dih/terraform/tests/functional
+          pytest --cov
+
+
+  TerraformDeploy:
+    name: 'TerraformDeploy'
+    needs: TerraformTesting
+    runs-on: [ orchestrator-runner ]
+    environment: QA
+
+    # Setup the current working directory
+    defaults:
+      run:
+        working-directory: ${{github.workspace}}/src/dih/terraform
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Clone The Repository
+      uses: actions/checkout@e2f20e631ae6d7dd3b768f56a5d2af784dd54791 # v3.5.2
+
+    - name: Setup Node
+      uses: actions/setup-node@2fddd8803e2f5c9604345a0b591c3020ee971a93
+      with: 
+        node-version: 14
+
+    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1
+      with:
+        terraform_version: "1.6.2"
+        
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform Init
+      env:
+        TF_TOKEN: ${{secrets.JF_ACCESS_TOKEN}}
+      run: |
+       envsubst < ../../../terraformrc > ~/.terraformrc
+       terraform init -backend-config="bucket=${{ vars.BACKEND_BUCKET }}" \
+        -backend-config="key=${{vars.BACKEND_DIH_KEY}}" \
+        -backend-config="region=${{ vars.AWS_REGION }}" \
+        -backend-config="dynamodb_table=${{ vars.BACKEND_DYNAMODB }}" \
+        -backend-config="encrypt=true" \
+        -backend-config="assume_role={\"role_arn\":\"${{ vars.BACKEND_ROLE_ARN }}\",\"external_id\":\"${{ secrets.BACKEND_EXTERNAL_ID }}\"}"
+
+    # Validate Terraform Configuration
+    - name: Terraform Validate
+      run: terraform validate
+
+    # Checks that all Terraform configuration files adhere to a canonical format
+    - name: Terraform Format
+      run: terraform fmt -check
+
+    # Generates an execution plan for Terraform
+    - name: Terraform Plan
+      run: |
+       terraform plan -input=false --out=tfplan
+
+      # On push to "develop", build or change infrastructure according to Terraform configuration files
+      
+    - name: Terraform Apply
+      if: ${{ github.event.pull_request.merged == true }}
+      run: |
+       terraform apply -auto-approve -input=false tfplan
+
+  # Publish the Job Status to Cloudwatchs
+#   PublishMetrics:
+#    runs-on: [ orchestrator-runner ]
+#    environment: QA
+#    needs: [TerraformDeploy, TerraformTesting]
+#    if: always()
+#    steps:
+#    - name: Publish Metrics to Amazon Cloudwatch and Microsoft Teams
+#      uses: UrbanIntelDS/service.git_action.core/publish_metrics@85475050bc9f44fc5d27b1d99b9b045b4eff0ec1
+#      with:
+#        is_failure: ${{ contains(needs.*.result, 'failure') }}
+#        webhook_uri: ${{secrets.TEAMS_WEBHOOK_URI}}
